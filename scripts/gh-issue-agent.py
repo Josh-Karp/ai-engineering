@@ -11,8 +11,8 @@ the four labels is ever on an issue at a time:
 
     ready-for-agent    -> eligible for the agent to pick up
     agent-in-progress  -> currently being worked on
-    agent-complete      -> a PR was opened
-    agent-failed       -> planning or implementation failed; check agent.log
+    agent-complete     -> a PR was opened
+    agent-failed       -> planning or implementation failed
 
 To retry a failed issue, just re-apply ready-for-agent by hand.
 
@@ -43,10 +43,12 @@ FAILED_LABEL = "agent-failed"
 POLL_INTERVAL_SECONDS = 600
 CLAUDE_TIMEOUT_SECONDS = 30 * 60  # hard kill for a hung run
 
+AGENT_LOG_FILE = "GH_ISSUE_AGENT.log"
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.FileHandler("agent.log"), logging.StreamHandler()],
+    handlers=[logging.FileHandler(AGENT_LOG_FILE), logging.StreamHandler()],
 )
 log = logging.getLogger("issue-agent")
 
@@ -185,7 +187,7 @@ def process_issue(issue):
     if not plan_result:
         log.error("Planning failed for #%s", number)
         set_labels(number, add=[FAILED_LABEL], remove=[IN_PROGRESS_LABEL])
-        post_comment(number, "Automated planning failed — see agent.log.")
+        post_comment(number, "Automated planning failed. See " + AGENT_LOG_FILE + ".")
         return
 
     plan_text = plan_result.get("result", "")
@@ -195,7 +197,7 @@ def process_issue(issue):
     if not impl_result:
         log.error("Implementation failed for #%s", number)
         set_labels(number, add=[FAILED_LABEL], remove=[IN_PROGRESS_LABEL])
-        post_comment(number, "Automated implementation failed — see agent.log.")
+        post_comment(number, "Automated implementation failed. See " + AGENT_LOG_FILE + ".")
         return
 
     log.info("Issue #%s done: %s", number, str(impl_result.get("result", ""))[:200])
