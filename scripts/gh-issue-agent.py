@@ -25,6 +25,9 @@ Usage:
     python issue_agent.py --dry-run  # print which issue would be picked up
                                       # next, without touching GitHub or
                                       # running Claude at all
+    python issue_agent.py -v         # add -v/--verbose to any of the above
+                                      # for full gh/claude command + response
+                                      # detail (cost, duration, raw output)
 """
 
 import argparse
@@ -57,10 +60,12 @@ log = logging.getLogger("issue-agent")
 
 
 def run_gh(args):
+    log.debug("gh %s", " ".join(args))
     result = subprocess.run(["gh", *args], capture_output=True, text=True)
     if result.returncode != 0:
         log.error("gh %s failed: %s", " ".join(args), result.stderr.strip())
         return None
+    log.debug("gh %s -> %s", args[0:2], result.stdout[:1000])
     return result.stdout
 
 
@@ -82,10 +87,16 @@ def get_ready_issues():
     )
     if not out:
         return []
-    return sorted(json.loads(out), key=lambda i: i["number"])
+    issues = sorted(json.loads(out), key=lambda i: i["number"])
+    log.debug(
+        "found %d ready issue(s): %s",
+        len(issues), [i["number"] for i in issues],
+    )
+    return issues
 
 
 def set_labels(number, add=None, remove=None):
+    log.debug("issue #%s: +%s -%s", number, add or [], remove or [])
     args = ["issue", "edit", str(number)]
     for label in add or []:
         args += ["--add-label", label]
@@ -95,6 +106,7 @@ def set_labels(number, add=None, remove=None):
 
 
 def post_comment(number, body):
+    log.debug("issue #%s: posting comment (%d chars)", number, len(body))
     run_gh(["issue", "comment", str(number), "--body", body])
 
 
@@ -102,7 +114,7 @@ def post_comment(number, body):
 
 
 def run_claude(
-    prompt, allowed_tools, permission_mode=None, timeout=CLAUDE_TIMEOUT_SECONDS
+    prompt, allowed_tools, permission_mode=None, model=None, timeout=CLAUDE_TIMEOUT_SECONDS
 ):
     """
     Run Claude Code non-interactively and return the parsed --output-format
@@ -121,6 +133,10 @@ def run_claude(
     ]
     if permission_mode:
         args += ["--permission-mode", permission_mode]
+    if model:
+        args += ["--model", model]
+
+    log.debug("claude args: %r", args)
 
     try:
         result = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
@@ -147,6 +163,16 @@ def run_claude(
         # with is_error set and the problem described in "result".
         log.error("claude reported an error: %s", parsed.get("result"))
         return None
+
+    log.info(
+        "claude call finished (model=%s): %sms, $%.4f, %s turn(s), session %s",
+        model or "default",
+        parsed.get("duration_ms"),
+        parsed.get("total_cost_usd", 0) or 0,
+        parsed.get("num_turns"),
+        parsed.get("session_id"),
+    )
+    log.debug("claude result text: %s", str(parsed.get("result", ""))[:2000])
     return parsed
 
 
@@ -159,11 +185,13 @@ def plan_issue(number, title, body):
     )
     # --permission-mode plan blocks every write/bash-mutation outright, so
     # this phase stays read-only regardless of the org's acceptEdits
-    # default in settings.json.
+    # default in settings.json. Haiku is plenty for read-only investigation
+    # and keeps this cheap phase cheap.
     return run_claude(
         prompt,
         allowed_tools="Read,Grep,Glob,Bash(git log *),Bash(git diff *)",
         permission_mode="plan",
+        model="haiku",
     )
 
 
@@ -183,6 +211,7 @@ def implement_issue(number, title, plan_text):
         prompt,
         allowed_tools="Bash,Read,Edit,Write",
         permission_mode="acceptEdits",
+        model="sonnet",
     )
 
 
@@ -194,6 +223,7 @@ def process_issue(issue):
     log.info("Claiming issue #%s: %s", number, title)
     set_labels(number, add=[IN_PROGRESS_LABEL], remove=[READY_LABEL])
 
+    log.info("Planning issue #%s", number)
     plan_result = plan_issue(number, title, body)
     if not plan_result:
         log.error("Planning failed for #%s", number)
@@ -202,8 +232,10 @@ def process_issue(issue):
         return
 
     plan_text = plan_result.get("result", "")
+    log.info("Plan ready for #%s (%d chars), posting comment", number, len(plan_text))
     post_comment(number, f"**Plan (automated):**\n\n{plan_text}")
 
+    log.info("Implementing issue #%s", number)
     impl_result = implement_issue(number, title, plan_text)
     if not impl_result:
         log.error("Implementation failed for #%s", number)
@@ -269,7 +301,14 @@ if __name__ == "__main__":
         action="store_true",
         help="print which issue would be picked up next; makes no GitHub or Claude calls that change anything",
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="log full gh/claude commands and responses (cost, duration, raw output) at DEBUG level",
+    )
     args = parser.parse_args()
+    if args.verbose:
+        log.setLevel(logging.DEBUG)
     if args.dry_run:
         dry_run()
     else:
