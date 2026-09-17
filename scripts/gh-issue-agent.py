@@ -204,9 +204,17 @@ def run_claude(
 def plan_issue(number, title, body):
     prompt = (
         f"You are planning work on GitHub issue #{number}: {title}\n\n{body}\n\n"
-        "Investigate the codebase and produce a short implementation plan: "
-        "which files change, the approach, risks, and a rough size estimate "
-        "(small/medium/large). Return just the plan."
+        "Investigate the codebase and produce a short implementation plan.\n\n"
+        "Return markdown formatted for GitHub with these sections:\n"
+        "## Plan\n"
+        "[2-3 sentence summary of the approach]\n\n"
+        "## Files Changed\n"
+        "[List of files that will be modified/created]\n\n"
+        "## Risks & Constraints\n"
+        "[Key risks, gotchas, or known constraints]\n\n"
+        "## Size\n"
+        "[small/medium/large with 1-sentence justification]\n\n"
+        "Be concise. No preamble or meta-commentary."
     )
     # --permission-mode plan blocks every write/bash-mutation outright, so
     # this phase stays read-only regardless of the org's acceptEdits
@@ -257,6 +265,12 @@ def process_issue(issue):
         return
 
     plan_text = plan_result.get("result", "")
+
+    # Strip meta-commentary lines (e.g., tool availability notes)
+    lines = [l for l in plan_text.split('\n')
+             if l.strip() and not any(x in l.lower() for x in ['exitplanmode', 'not available', 'let me know'])]
+    plan_text = '\n'.join(lines)
+
     log.info("Plan ready for #%s (%d chars), posting comment", number, len(plan_text))
     post_comment(number, f"**Plan (automated):**\n\n{plan_text}")
 
