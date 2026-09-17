@@ -106,16 +106,12 @@ def run_claude(
 ):
     """
     Run Claude Code non-interactively and return the parsed --output-format
-    json result dict, or None on failure. `--bare` keeps runs deterministic
-    in CI (skips hooks/MCP/plugins from whatever happens to be on the
-    machine); `--permission-prompts none` guarantees nothing blocks waiting
-    for a human who isn't there.
+    json result dict, or None on failure.
     """
     args = [
         "claude",
         "-p",
         prompt,
-        "--bare",
         "--output-format",
         "json",
         "--permission-prompts",
@@ -133,13 +129,25 @@ def run_claude(
         return None
 
     if result.returncode != 0:
-        log.error("claude exited %s: %s", result.returncode, result.stderr[-2000:])
+        # Claude Code prints some failures (e.g. missing auth) to stdout
+        # rather than stderr, so log both.
+        log.error(
+            "claude exited %s\nstdout: %s\nstderr: %s",
+            result.returncode, result.stdout[-2000:], result.stderr[-2000:],
+        )
         return None
     try:
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
     except json.JSONDecodeError:
         log.error("could not parse claude output: %s", result.stdout[-2000:])
         return None
+    if parsed.get("is_error"):
+        # Exit code 0 doesn't guarantee success — auth failures, rate
+        # limits, etc. can come back as a normal-looking JSON envelope
+        # with is_error set and the problem described in "result".
+        log.error("claude reported an error: %s", parsed.get("result"))
+        return None
+    return parsed
 
 
 def plan_issue(number, title, body):
@@ -147,12 +155,15 @@ def plan_issue(number, title, body):
         f"You are planning work on GitHub issue #{number}: {title}\n\n{body}\n\n"
         "Investigate the codebase and produce a short implementation plan: "
         "which files change, the approach, risks, and a rough size estimate "
-        "(small/medium/large). Do not write or edit any code — read-only "
-        "investigation only. Return just the plan."
+        "(small/medium/large). Return just the plan."
     )
-    # Read-only tools: this phase can never touch the repo.
+    # --permission-mode plan blocks every write/bash-mutation outright, so
+    # this phase stays read-only regardless of the org's acceptEdits
+    # default in settings.json.
     return run_claude(
-        prompt, allowed_tools="Read,Grep,Glob,Bash(git log *),Bash(git diff *)"
+        prompt,
+        allowed_tools="Read,Grep,Glob,Bash(git log *),Bash(git diff *)",
+        permission_mode="plan",
     )
 
 
