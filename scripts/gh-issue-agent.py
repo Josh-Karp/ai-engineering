@@ -6,13 +6,10 @@ Polls GitHub for issues labeled "ready-for-agent" and runs each one through
 a plan -> implement pipeline using Claude Code in headless mode, opening a
 PR when the work is done.
 
-State lives entirely in GitHub labels — no local state file. Only one of
-the four labels is ever on an issue at a time:
+State lives entirely in GitHub labels — no local state file:
 
     ready-for-agent    -> eligible for the agent to pick up
-    agent-in-progress  -> currently being worked on
-    agent-complete     -> a PR was opened
-    agent-failed       -> planning or implementation failed
+    agent-in-progress  -> currently being worked on (removed on completion or failure)
 
 To retry a failed issue, just re-apply ready-for-agent by hand.
 
@@ -40,8 +37,6 @@ import time
 
 READY_LABEL = "ready-for-agent"
 IN_PROGRESS_LABEL = "agent-in-progress"
-COMPLETE_LABEL = "agent-complete"
-FAILED_LABEL = "agent-failed"
 
 POLL_INTERVAL_SECONDS = 600
 CLAUDE_TIMEOUT_SECONDS = 30 * 60  # hard kill for a hung run
@@ -103,6 +98,36 @@ def set_labels(number, add=None, remove=None):
     for label in remove or []:
         args += ["--remove-label", label]
     run_gh(args)
+
+
+def get_pr_for_branch(branch_name):
+    """Find the PR associated with a branch."""
+    out = run_gh(
+        [
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--head",
+            branch_name,
+            "--json",
+            "number",
+            "--limit",
+            "1",
+        ]
+    )
+    if not out:
+        return None
+    prs = json.loads(out)
+    if prs:
+        return prs[0]["number"]
+    return None
+
+
+def add_pr_label(pr_number, label):
+    """Add a label to a PR."""
+    log.debug("PR #%s: +%s", pr_number, label)
+    run_gh(["pr", "edit", str(pr_number), "--add-label", label])
 
 
 def post_comment(number, body):
@@ -227,7 +252,7 @@ def process_issue(issue):
     plan_result = plan_issue(number, title, body)
     if not plan_result:
         log.error("Planning failed for #%s", number)
-        set_labels(number, add=[FAILED_LABEL], remove=[IN_PROGRESS_LABEL])
+        set_labels(number, remove=[IN_PROGRESS_LABEL])
         post_comment(number, "Automated planning failed. See " + AGENT_LOG_FILE + ".")
         return
 
@@ -239,12 +264,18 @@ def process_issue(issue):
     impl_result = implement_issue(number, title, plan_text)
     if not impl_result:
         log.error("Implementation failed for #%s", number)
-        set_labels(number, add=[FAILED_LABEL], remove=[IN_PROGRESS_LABEL])
+        set_labels(number, remove=[IN_PROGRESS_LABEL])
         post_comment(number, "Automated implementation failed. See " + AGENT_LOG_FILE + ".")
         return
 
     log.info("Issue #%s done: %s", number, str(impl_result.get("result", ""))[:200])
-    set_labels(number, add=[COMPLETE_LABEL], remove=[IN_PROGRESS_LABEL])
+    set_labels(number, remove=[IN_PROGRESS_LABEL])
+
+    pr_number = get_pr_for_branch(f"issue-{number}")
+    if pr_number:
+        add_pr_label(pr_number, "automated-pr")
+    else:
+        log.warning("Could not find PR for branch issue-%s", number)
 
 
 def dry_run():
